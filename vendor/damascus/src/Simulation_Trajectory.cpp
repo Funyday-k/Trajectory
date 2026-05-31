@@ -1,5 +1,7 @@
 #include "Simulation_Trajectory.hpp"
 
+#include "Solar_Model.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -117,6 +119,12 @@ bool Trajectory_Result::Particle_Reflected(Celestial_Model& body_model) const
 	double r	= final_event.Radius();
 	double vesc = body_model.Local_Escape_Speed(r);
 	return r > body_model.Radius() && final_event.Speed() > vesc && number_of_scatterings > 0;
+}
+
+bool Trajectory_Result::Particle_Reflected() const
+{
+	Solar_Model solar_model;
+	return Particle_Reflected(solar_model);
 }
 
 bool Trajectory_Result::Particle_Free() const

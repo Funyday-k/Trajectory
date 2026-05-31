@@ -19,18 +19,35 @@ set(DAMASCUS_SRC_DIR "${DAMASCUS_ROOT}/src")
 set(DAMASCUS_DATA_DIR "${DAMASCUS_ROOT}/data")
 set(OBSCURA_DIR "${DAMASCUS_ROOT}/external/obscura")
 set(GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+option(ENABLE_EARTH_MODEL "Build Earth model support when Earth_Model files exist" ON)
 
 if(NOT EXISTS "${DAMASCUS_INCLUDE_DIR}/Simulation_Trajectory.hpp")
   message(FATAL_ERROR "DAMASCUS_ROOT does not contain include/Simulation_Trajectory.hpp: ${DAMASCUS_ROOT}")
 endif()
+if(NOT EXISTS "${DAMASCUS_INCLUDE_DIR}/Celestial_Model.hpp")
+  message(FATAL_ERROR "DAMASCUS_ROOT must point to the refactored DaMaSCUS source tree and contain include/Celestial_Model.hpp: ${DAMASCUS_ROOT}")
+endif()
 if(NOT EXISTS "${DAMASCUS_DATA_DIR}/model_agss09.dat")
   message(FATAL_ERROR "DAMASCUS_ROOT does not contain data/model_agss09.dat: ${DAMASCUS_ROOT}")
 endif()
-if(NOT EXISTS "${DAMASCUS_DATA_DIR}/earth_prem.dat")
-  message(FATAL_ERROR "DAMASCUS_ROOT does not contain data/earth_prem.dat: ${DAMASCUS_ROOT}")
-endif()
 if(NOT EXISTS "${OBSCURA_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "DAMASCUS_ROOT does not contain external/obscura: ${DAMASCUS_ROOT}")
+endif()
+
+set(DAMASCUS_HAS_EARTH_MODEL OFF)
+if(ENABLE_EARTH_MODEL AND EXISTS "${DAMASCUS_INCLUDE_DIR}/Earth_Model.hpp" AND EXISTS "${DAMASCUS_SRC_DIR}/Earth_Model.cpp")
+  if(NOT EXISTS "${DAMASCUS_DATA_DIR}/earth_prem.dat")
+    message(FATAL_ERROR "Earth model support is enabled but DAMASCUS_ROOT does not contain data/earth_prem.dat: ${DAMASCUS_ROOT}")
+  endif()
+  set(DAMASCUS_HAS_EARTH_MODEL ON)
+elseif(ENABLE_EARTH_MODEL)
+  message(STATUS "Earth model support disabled: Earth_Model.hpp/cpp not found under DAMASCUS_ROOT=${DAMASCUS_ROOT}")
+endif()
+
+if(DAMASCUS_HAS_EARTH_MODEL)
+  set(DAMASCUS_HAS_EARTH_MODEL_DEFINE 1)
+else()
+  set(DAMASCUS_HAS_EARTH_MODEL_DEFINE 0)
 endif()
 
 set(Boost_ADDITIONAL_VERSIONS "1.77.0" "1.77")
@@ -49,14 +66,21 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in"
   "${GENERATED_DIR}/version.hpp")
 
-add_library(damascus_trajectory_core STATIC
+set(DAMASCUS_TRAJECTORY_CORE_SOURCES
   "${DAMASCUS_SRC_DIR}/Dark_Photon.cpp"
-  "${DAMASCUS_SRC_DIR}/Earth_Model.cpp"
   "${DAMASCUS_SRC_DIR}/Simulation_Trajectory.cpp"
   "${DAMASCUS_SRC_DIR}/Simulation_Utilities.cpp"
   "${DAMASCUS_SRC_DIR}/Solar_Model.cpp")
 
+if(DAMASCUS_HAS_EARTH_MODEL)
+  list(APPEND DAMASCUS_TRAJECTORY_CORE_SOURCES "${DAMASCUS_SRC_DIR}/Earth_Model.cpp")
+endif()
+
+add_library(damascus_trajectory_core STATIC
+  ${DAMASCUS_TRAJECTORY_CORE_SOURCES})
+
 target_compile_options(damascus_trajectory_core PUBLIC -Wall -pedantic)
+target_compile_definitions(damascus_trajectory_core PUBLIC DAMASCUS_HAS_EARTH_MODEL=${DAMASCUS_HAS_EARTH_MODEL_DEFINE})
 target_include_directories(damascus_trajectory_core
   PUBLIC
     "${DAMASCUS_INCLUDE_DIR}"
@@ -81,17 +105,19 @@ target_link_libraries(DaMaSCUS-SUN-TrajectoryTXT
   PRIVATE
     damascus_trajectory_core)
 
-add_executable(DaMaSCUS-EarthModelCheck
-  src/earth_model_check.cpp)
+if(DAMASCUS_HAS_EARTH_MODEL)
+  add_executable(DaMaSCUS-EarthModelCheck
+    src/earth_model_check.cpp)
 
-target_compile_options(DaMaSCUS-EarthModelCheck PUBLIC -Wall -pedantic)
-target_include_directories(DaMaSCUS-EarthModelCheck
-  PRIVATE
-    "${DAMASCUS_INCLUDE_DIR}"
-    "${GENERATED_DIR}"
-    ${MPI_INCLUDE_PATH})
-target_link_libraries(DaMaSCUS-EarthModelCheck
-  PRIVATE
-    damascus_trajectory_core)
+  target_compile_options(DaMaSCUS-EarthModelCheck PUBLIC -Wall -pedantic)
+  target_include_directories(DaMaSCUS-EarthModelCheck
+    PRIVATE
+      "${DAMASCUS_INCLUDE_DIR}"
+      "${GENERATED_DIR}"
+      ${MPI_INCLUDE_PATH})
+  target_link_libraries(DaMaSCUS-EarthModelCheck
+    PRIVATE
+      damascus_trajectory_core)
+endif()
 
 install(TARGETS DaMaSCUS-SUN-TrajectoryTXT DESTINATION bin)

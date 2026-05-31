@@ -28,10 +28,17 @@
 
 #include "Dark_Photon.hpp"
 #include "Celestial_Model.hpp"
+#if DAMASCUS_HAS_EARTH_MODEL
+#include "Earth_Model.hpp"
+#endif
 #include "Simulation_Trajectory.hpp"
 #include "Simulation_Utilities.hpp"
 #include "Solar_Model.hpp"
 #include "version.hpp"
+
+#ifndef DAMASCUS_HAS_EARTH_MODEL
+#define DAMASCUS_HAS_EARTH_MODEL 0
+#endif
 
 using namespace DaMaSCUS_SUN;
 using namespace libconfig;
@@ -42,6 +49,9 @@ namespace
 struct Run_Config
 {
 	std::string body = "Sun";
+	bool body_configured = false;
+	std::string body_model_file;
+	std::string body_composition = "layered";
 	std::string output_dir;
 	unsigned int sample_size = 1000;
 	unsigned int interpolation_points = 1000;
@@ -51,6 +61,9 @@ struct Run_Config
 	double initial_radius_body_radius = 2.0;
 	double initial_radius = 0.0;
 	double asymptotic_distance = 1000.0 * AU;
+	double asymptotic_distance_body_radius = 0.0;
+	double bincount_max_radius_body_radius = 2.0;
+	double bincount_max_radius = 0.0;
 	double max_trajectory_wall_time_sec = 300.0;
 	bool capture_mode = false;
 	bool clear_existing_trajectories = true;
@@ -235,14 +248,39 @@ unsigned long int Optional_Unsigned_Long(const Config& config, const char* key, 
 	std::exit(EXIT_FAILURE);
 }
 
+void Require_Positive(double value, const char* key)
+{
+	if(!std::isfinite(value) || value <= 0.0)
+	{
+		std::cerr << key << " must be positive." << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
+}
+
 Run_Config Read_Run_Config(const Config& config)
 {
 	Run_Config run;
+	run.body_configured = Setting_Exists(config, "body");
 	run.body = Optional_String(config, "body", "Sun");
-	if(run.body != "Sun")
+	if(run.body != "Sun" && run.body != "Earth")
 	{
 		std::cerr << "Unsupported body: " << run.body << std::endl;
 		std::exit(EXIT_FAILURE);
+	}
+	if(run.body == "Earth")
+	{
+#if DAMASCUS_HAS_EARTH_MODEL
+		run.body_model_file = Optional_String(config, "body_model_file", std::string(PROJECT_DIR) + "/data/earth_prem.dat");
+		run.body_composition = Optional_String(config, "body_composition", "layered");
+		if(run.body_composition != "layered")
+		{
+			std::cerr << "Unsupported body_composition for Earth: " << run.body_composition << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+#else
+		std::cerr << "Unsupported body: Earth (Earth model support was not built)." << std::endl;
+		std::exit(EXIT_FAILURE);
+#endif
 	}
 	run.output_dir = Optional_String(config, "output_dir", "./trajectory_output");
 	int sample_size = Required_Value<int>(config, "sample_size");
@@ -262,7 +300,20 @@ Run_Config Read_Run_Config(const Config& config)
 	run.max_trajectories = Optional_Unsigned_Long(config, "max_trajectories", run.sample_size * 1000UL);
 	run.maximum_number_of_scatterings = Optional_Unsigned_Long(config, "maximum_number_of_scatterings", DEFAULT_MAXIMUM_SCATTERINGS);
 	run.maximum_free_time_steps = Optional_Unsigned_Long(config, "maximum_free_time_steps", DEFAULT_MAXIMUM_FREE_TIME_STEPS);
-	run.initial_radius_body_radius = Optional_Value<double>(config, "initial_radius_rsun", 2.0);
+	if(run.body == "Sun" && Setting_Exists(config, "initial_radius_rsun"))
+		run.initial_radius_body_radius = Optional_Value<double>(config, "initial_radius_rsun", 2.0);
+	else
+		run.initial_radius_body_radius = Optional_Value<double>(config, "initial_radius_body_radius", 2.0);
+	Require_Positive(run.initial_radius_body_radius, (run.body == "Sun" && Setting_Exists(config, "initial_radius_rsun")) ? "initial_radius_rsun" : "initial_radius_body_radius");
+	if(Setting_Exists(config, "asymptotic_distance_body_radius"))
+	{
+		run.asymptotic_distance_body_radius = Optional_Value<double>(config, "asymptotic_distance_body_radius", 0.0);
+		Require_Positive(run.asymptotic_distance_body_radius, "asymptotic_distance_body_radius");
+	}
+	else if(run.body == "Earth")
+		run.asymptotic_distance_body_radius = 1000.0;
+	run.bincount_max_radius_body_radius = Optional_Value<double>(config, "bincount_max_radius_body_radius", run.initial_radius_body_radius);
+	Require_Positive(run.bincount_max_radius_body_radius, "bincount_max_radius_body_radius");
 	run.max_trajectory_wall_time_sec = Optional_Value<double>(config, "max_trajectory_wall_time_sec", 300.0);
 	run.capture_mode = Optional_Value<bool>(config, "capture_mode", false);
 	run.clear_existing_trajectories = Optional_Value<bool>(config, "clear_existing_trajectories", true);
@@ -432,6 +483,46 @@ double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximu
 	return std::max(cap, 1.0e-8 * sec);
 }
 
+std::unique_ptr<Celestial_Model> Build_Body_Model(const Run_Config& run_config)
+{
+	if(run_config.body == "Sun")
+		return std::unique_ptr<Celestial_Model>(new Solar_Model());
+
+#if DAMASCUS_HAS_EARTH_MODEL
+	if(run_config.body == "Earth")
+		return std::unique_ptr<Celestial_Model>(new Earth_Model(run_config.body_model_file));
+#endif
+
+	std::cerr << "Unsupported body: " << run_config.body << std::endl;
+	std::exit(EXIT_FAILURE);
+}
+
+std::string Body_Output_Directory_Name(const std::string& body)
+{
+	if(body == "Earth")
+		return "earth";
+	return "sun";
+}
+
+void Print_Body_Summary(const Run_Config& run_config, Celestial_Model& body_model)
+{
+	std::cout << "Body: " << run_config.body << std::endl
+	          << "Body model: " << body_model.Name() << std::endl
+	          << "Body radius [km]: " << In_Units(body_model.Radius(), km) << std::endl
+	          << "Body mass [kg]: " << In_Units(body_model.Total_Mass(), kg) << std::endl;
+#if DAMASCUS_HAS_EARTH_MODEL
+	if(run_config.body == "Earth")
+	{
+		Earth_Model* earth_model = dynamic_cast<Earth_Model*>(&body_model);
+		if(earth_model != NULL)
+		{
+			std::cout << "Body model file: " << earth_model->Model_File() << std::endl;
+			std::cout << "Body composition: " << run_config.body_composition << std::endl;
+		}
+	}
+#endif
+}
+
 bool Outward_Escaping_At_Boundary(const Event& event, Celestial_Model& body_model, double boundary_radius)
 {
 	const double radius = event.Radius();
@@ -576,7 +667,10 @@ std::string Parameter_Output_Directory(const Run_Config& run_config, obscura::DM
 {
 	double mass_log10 = log10(In_Units(DM.mass, GeV));
 	double sigma_log10 = log10(In_Units(DM.Sigma_Proton(), cm * cm));
-	return Join_Path(run_config.output_dir, "results_" + std::to_string(mass_log10) + "_" + std::to_string(sigma_log10));
+	std::string parameter_dir = "results_" + std::to_string(mass_log10) + "_" + std::to_string(sigma_log10);
+	if(run_config.body_configured)
+		return Join_Path(Join_Path(run_config.output_dir, Body_Output_Directory_Name(run_config.body)), parameter_dir);
+	return Join_Path(run_config.output_dir, parameter_dir);
 }
 
 std::string Trajectory_File_Path(const std::string& output_dir, unsigned long int local_id, int mpi_rank)
@@ -626,21 +720,24 @@ int main(int argc, char* argv[])
 	std::unique_ptr<obscura::DM_Distribution> DM_distribution = Build_DM_Distribution(config);
 
 	auto time_start = std::chrono::system_clock::now();
-	Solar_Model solar_model;
-	run_config.initial_radius = run_config.initial_radius_body_radius * solar_model.Radius();
+	std::unique_ptr<Celestial_Model> body_model = Build_Body_Model(run_config);
+	run_config.initial_radius = run_config.initial_radius_body_radius * body_model->Radius();
+	run_config.bincount_max_radius = run_config.bincount_max_radius_body_radius * body_model->Radius();
+	if(run_config.asymptotic_distance_body_radius > 0.0)
+		run_config.asymptotic_distance = run_config.asymptotic_distance_body_radius * body_model->Radius();
 	if(mpi_rank == 0)
 	{
 		std::cout << PROJECT_NAME << " " << PROJECT_VERSION << std::endl
 		          << "Trajectory TXT runner" << std::endl
 		          << "MPI processes: " << mpi_processes << std::endl
-		          << "Body: " << run_config.body << std::endl
 		          << "Output mode: trajectory txt files only" << std::endl;
+		Print_Body_Summary(run_config, *body_model);
 		if(run_config.random_seed_configured)
 			std::cout << "PRNG seed: random_seed + mpi_rank, base random_seed = " << run_config.random_seed << std::endl;
 		else
 			std::cout << "PRNG seed: random_device" << std::endl;
 	}
-	solar_model.Interpolate_Total_DM_Scattering_Rate(*DM, run_config.interpolation_points, run_config.interpolation_points);
+	body_model->Interpolate_Total_DM_Scattering_Rate(*DM, run_config.interpolation_points, run_config.interpolation_points);
 
 	std::string output_dir = Parameter_Output_Directory(run_config, *DM);
 	if(mpi_rank == 0)
@@ -659,7 +756,7 @@ int main(int argc, char* argv[])
 	if(run_config.max_trajectories != 0)
 		max_trajectories_per_rank = (run_config.max_trajectories + mpi_processes - 1) / mpi_processes;
 
-	Trajectory_Simulator simulator(solar_model, run_config.maximum_free_time_steps, run_config.maximum_number_of_scatterings, run_config.initial_radius);
+	Trajectory_Simulator simulator(*body_model, run_config.maximum_free_time_steps, run_config.maximum_number_of_scatterings, run_config.bincount_max_radius);
 	simulator.max_trajectory_wall_time_sec = run_config.max_trajectory_wall_time_sec;
 	if(run_config.random_seed_configured)
 	{
@@ -694,9 +791,9 @@ int main(int argc, char* argv[])
 			MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
 		}
 
-		Event initial_condition = Initial_Conditions(*DM_distribution, solar_model, simulator.PRNG, run_config.asymptotic_distance);
-		Hyperbolic_Kepler_Shift(initial_condition, solar_model, run_config.initial_radius);
-		Trajectory_Stats stats = Simulate_Trajectory_To_Txt(initial_condition, *DM, solar_model, simulator, run_config, trajectory_file);
+		Event initial_condition = Initial_Conditions(*DM_distribution, *body_model, simulator.PRNG, run_config.asymptotic_distance);
+		Hyperbolic_Kepler_Shift(initial_condition, *body_model, run_config.initial_radius);
+		Trajectory_Stats stats = Simulate_Trajectory_To_Txt(initial_condition, *DM, *body_model, simulator, run_config, trajectory_file);
 		trajectory_file.close();
 
 		local_total++;

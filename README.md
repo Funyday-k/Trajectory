@@ -93,6 +93,10 @@ mpiicpc -show
 
 ## Build
 
+`DAMASCUS_ROOT`, when set, must point to this refactored DaMaSCUS source tree or another tree that contains the same generalized trajectory interfaces, including `include/Celestial_Model.hpp`, `include/Simulation_Trajectory.hpp`, `src/Simulation_Trajectory.cpp`, and `src/Simulation_Utilities.cpp`. Older unrefactored DaMaSCUS source trees are not compatible with this wrapper even when Earth support is disabled, because the trajectory code now depends on `Celestial_Model.hpp` unconditionally.
+
+Earth support is enabled automatically when `Earth_Model.hpp`, `Earth_Model.cpp`, and `earth_prem.dat` are present under `DAMASCUS_ROOT`. If those Earth files are absent, the project can still build the solar path as long as `DAMASCUS_ROOT` is the refactored tree with `Celestial_Model.hpp`.
+
 Linux with Intel MPI:
 
 ```bash
@@ -121,19 +125,32 @@ cmake --build build --target DaMaSCUS-SUN-TrajectoryTXT --config Release -j4
 
 ## Run
 
-The current default body is `Sun`. Existing solar configs do not need a `body` setting; if omitted, the executable behaves as the solar runner. `body = "Sun"` is accepted explicitly, and other body names are reserved for later refactor tasks. For reproducible smoke checks, set optional `random_seed`; when present, each MPI rank uses `random_seed + mpi_rank`.
+Supported bodies are `Sun` and `Earth`. Existing solar configs do not need a `body` setting; if omitted, the executable behaves as the original solar runner. `body = "Sun"` and `body = "Earth"` are both accepted explicitly. For reproducible smoke checks, set optional `random_seed`; when present, each MPI rank uses `random_seed + mpi_rank`.
 
-Smoke test:
+Solar smoke test:
 
 ```bash
 mpirun -np 1 ./build/DaMaSCUS-SUN-TrajectoryTXT config/smoke.cfg
 head -5 smoke_output/results_*/trajectory_1_task0.txt
 ```
 
-Normal run:
+Earth smoke test:
+
+```bash
+mpirun -np 1 ./build/DaMaSCUS-SUN-TrajectoryTXT config/earth_smoke.cfg
+head -5 smoke_output/earth/results_*/trajectory_1_task0.txt
+```
+
+Normal solar run:
 
 ```bash
 mpirun -np 4 ./build/DaMaSCUS-SUN-TrajectoryTXT config/example.cfg
+```
+
+Normal Earth run:
+
+```bash
+mpirun -np 4 ./build/DaMaSCUS-SUN-TrajectoryTXT config/earth_example.cfg
 ```
 
 Inside a SLURM job, for example with 32 MPI processes:
@@ -142,7 +159,52 @@ Inside a SLURM job, for example with 32 MPI processes:
 mpirun -np 32 ./build/DaMaSCUS-SUN-TrajectoryTXT config/example.cfg
 ```
 
-The output directory is controlled by `output_dir` in the config file. Trajectory file names look like:
+### Body Configuration
+
+Common fields:
+
+```text
+body = "Sun";                         // optional, defaults to Sun when omitted
+initial_radius_body_radius = 2.0;      // outer simulation boundary in current body radii
+asymptotic_distance_body_radius = 1000.0;
+bincount_max_radius_body_radius = 2.0;
+random_seed = 12345;                   // optional, seed is offset by MPI rank
+```
+
+Solar compatibility fields:
+
+```text
+initial_radius_rsun = 2.0;
+```
+
+`initial_radius_rsun` remains supported for solar configs and takes precedence over `initial_radius_body_radius` when `body` is `Sun`. New configs should prefer `initial_radius_body_radius`. If `asymptotic_distance_body_radius` is omitted for solar configs, the legacy `1000 AU` asymptotic distance is retained.
+
+Earth-specific fields:
+
+```text
+body = "Earth";
+body_model_file = "vendor/damascus/data/earth_prem.dat";
+body_composition = "layered";
+```
+
+The bundled `earth_prem.dat` and `layered` composition are smoke-grade engineering data. They are suitable for testing the generalized trajectory path, not for final physics results. Earth support is enabled automatically when `Earth_Model.hpp`, `Earth_Model.cpp`, and `earth_prem.dat` are present under `DAMASCUS_ROOT`; otherwise the project builds the solar path and `body = "Earth"` reports that Earth support was not built. In all cases, `DAMASCUS_ROOT` must still contain `Celestial_Model.hpp` from this refactor.
+
+### Output
+
+The output directory is controlled by `output_dir` in the config file. When `body` is omitted, old solar configs keep the legacy path:
+
+```text
+smoke_output/results_<log10_dm_mass>_<log10_cross_section>/trajectory_1_task0.txt
+```
+
+When `body` is explicit, the parameter directory is grouped by body:
+
+```text
+smoke_output/sun/results_<log10_dm_mass>_<log10_cross_section>/trajectory_1_task0.txt
+smoke_output/earth/results_<log10_dm_mass>_<log10_cross_section>/trajectory_1_task0.txt
+```
+
+Trajectory file names look like:
 
 ```text
 trajectory_1_task0.txt

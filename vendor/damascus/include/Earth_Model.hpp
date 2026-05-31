@@ -1,57 +1,52 @@
-#ifndef __Solar_Model_hpp_
-#define __Solar_Model_hpp_
+#ifndef __Earth_Model_hpp_
+#define __Earth_Model_hpp_
 
-#include "libphysica/Linear_Algebra.hpp"
+#include <string>
+#include <vector>
+
 #include "libphysica/Numerics.hpp"
 
 #include "Celestial_Model.hpp"
 
-#include "obscura/DM_Particle.hpp"
-#include "obscura/Target_Nucleus.hpp"
-
 namespace DaMaSCUS_SUN
 {
 
-// 1. Nuclear targets in the Sun
-class Solar_Isotope : public obscura::Isotope
+class Earth_Isotope : public obscura::Isotope
 {
   private:
-	libphysica::Interpolation number_density;
+	std::vector<double> layer_mass_fractions;
 
   public:
-	Solar_Isotope(const obscura::Isotope& isotope, const std::vector<std::vector<double>>& density_table, double abundance = 1.0);
+	Earth_Isotope(const obscura::Isotope& isotope, const std::vector<double>& mass_fractions_by_layer);
 
-	double Number_Density(double r);
+	double Mass_Fraction(unsigned int layer_index) const;
 };
 
-// 2. Solar model
-class Solar_Model : public Celestial_Model
+class Earth_Model : public Celestial_Model
 {
   private:
-	libphysica::Interpolation mass, temperature, local_escape_speed_squared, mass_density;
-
-	// Auxiliary functions for the data import
+	std::string model_file;
 	std::vector<std::vector<double>> raw_data;
-	void Import_Raw_Data();
-	std::vector<std::vector<double>> Create_Interpolation_Table(unsigned int row) const;
-	std::vector<std::vector<double>> Create_Escape_Speed_Table();
-	std::vector<std::vector<double>> Create_Number_Density_Table(unsigned int target, double mass) const;
-	std::vector<std::vector<double>> Create_Number_Density_Table_Electron();
-
-	// Solar electrons
-	libphysica::Interpolation number_density_electron;
-
-	// Interpolation of total scattering rate
+	libphysica::Interpolation mass, temperature, local_escape_speed_squared, mass_density;
 	bool using_interpolated_rate;
 	libphysica::Interpolation_2D rate_interpolation;
+	std::vector<double> layer_outer_radii;
+
+	void Import_Raw_Data(const std::string& path);
+	std::vector<std::vector<double>> Create_Interpolation_Table(unsigned int column) const;
+	std::vector<std::vector<double>> Create_Escape_Speed_Table();
+	void Initialize_Composition();
+	unsigned int Layer_Index(double r) const;
 
   public:
 	std::string name;
-	std::vector<Solar_Isotope> target_isotopes;
+	std::vector<Earth_Isotope> target_isotopes;
 
-	Solar_Model();
+	Earth_Model();
+	explicit Earth_Model(const std::string& path);
 
 	const std::string& Name() const override;
+	const std::string& Model_File() const;
 	double Radius() const override;
 	double Total_Mass() const override;
 
@@ -68,15 +63,14 @@ class Solar_Model : public Celestial_Model
 
 	double DM_Scattering_Rate_Electron(obscura::DM_Particle& DM, double r, double DM_speed) override;
 	double DM_Scattering_Rate_Nucleus(obscura::DM_Particle& DM, double r, double DM_speed, unsigned int nucleus_index) override;
-
 	double Total_DM_Scattering_Rate(obscura::DM_Particle& DM, double r, double DM_speed) override;
 	double Total_DM_Scattering_Rate_Computed(obscura::DM_Particle& DM, double r, double DM_speed);
-
 	double Total_DM_Scattering_Rate_Interpolated(obscura::DM_Particle& DM, double r, double DM_speed);
 	void Interpolate_Total_DM_Scattering_Rate(obscura::DM_Particle& DM, unsigned int N_radius, unsigned int N_speed) override;
 
-	void Print_Summary(int mpi_rank = 0) const;
+	void Print_Summary(int mpi_rank = 0);
 };
 
-}	// namespace DaMaSCUS_SUN
+} // namespace DaMaSCUS_SUN
+
 #endif

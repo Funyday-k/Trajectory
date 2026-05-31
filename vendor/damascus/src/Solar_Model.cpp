@@ -156,6 +156,36 @@ Solar_Model::Solar_Model()
 	number_density_electron = libphysica::Interpolation(Create_Number_Density_Table_Electron());
 }
 
+const std::string& Solar_Model::Name() const
+{
+	return name;
+}
+
+double Solar_Model::Radius() const
+{
+	return rSun;
+}
+
+double Solar_Model::Total_Mass() const
+{
+	return mSun;
+}
+
+unsigned int Solar_Model::Target_Count() const
+{
+	return static_cast<unsigned int>(target_isotopes.size());
+}
+
+const obscura::Isotope& Solar_Model::Target_Isotope(unsigned int index) const
+{
+	if(index >= target_isotopes.size())
+	{
+		std::cerr << "Error in Solar_Model::Target_Isotope(): Index = " << index << " is out of bound (number of targets: " << target_isotopes.size() << ")." << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
+	return target_isotopes[index];
+}
+
 double Solar_Model::Mass(double r)
 {
 	// 边界检查：防止负半径

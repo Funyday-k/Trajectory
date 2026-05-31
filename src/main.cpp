@@ -27,6 +27,7 @@
 #include "obscura/DM_Particle_Standard.hpp"
 
 #include "Dark_Photon.hpp"
+#include "Celestial_Model.hpp"
 #include "Simulation_Trajectory.hpp"
 #include "Simulation_Utilities.hpp"
 #include "Solar_Model.hpp"
@@ -40,18 +41,23 @@ namespace
 {
 struct Run_Config
 {
+	std::string body = "Sun";
 	std::string output_dir;
 	unsigned int sample_size = 1000;
 	unsigned int interpolation_points = 1000;
 	unsigned long int max_trajectories = 0;
 	unsigned long int maximum_number_of_scatterings = DEFAULT_MAXIMUM_SCATTERINGS;
 	unsigned long int maximum_free_time_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS;
-	double initial_radius = 2.0 * rSun;
+	double initial_radius_body_radius = 2.0;
+	double initial_radius = 0.0;
+	double asymptotic_distance = 1000.0 * AU;
 	double max_trajectory_wall_time_sec = 300.0;
 	bool capture_mode = false;
 	bool clear_existing_trajectories = true;
 	unsigned int trajectory_write_stride = 1;
 	int txt_precision = 10;
+	bool random_seed_configured = false;
+	int random_seed = 0;
 };
 
 struct Trajectory_Stats
@@ -175,6 +181,19 @@ std::string Optional_String(const Config& config, const char* key, const std::st
 	}
 }
 
+bool Setting_Exists(const Config& config, const char* key)
+{
+	try
+	{
+		config.lookup(key);
+		return true;
+	}
+	catch(const SettingNotFoundException&)
+	{
+		return false;
+	}
+}
+
 unsigned long int Optional_Unsigned_Long(const Config& config, const char* key, unsigned long int default_value)
 {
 	try
@@ -219,6 +238,12 @@ unsigned long int Optional_Unsigned_Long(const Config& config, const char* key, 
 Run_Config Read_Run_Config(const Config& config)
 {
 	Run_Config run;
+	run.body = Optional_String(config, "body", "Sun");
+	if(run.body != "Sun")
+	{
+		std::cerr << "Unsupported body: " << run.body << std::endl;
+		std::exit(EXIT_FAILURE);
+	}
 	run.output_dir = Optional_String(config, "output_dir", "./trajectory_output");
 	int sample_size = Required_Value<int>(config, "sample_size");
 	int interpolation_points = Optional_Value<int>(config, "interpolation_points", 1000);
@@ -237,13 +262,22 @@ Run_Config Read_Run_Config(const Config& config)
 	run.max_trajectories = Optional_Unsigned_Long(config, "max_trajectories", run.sample_size * 1000UL);
 	run.maximum_number_of_scatterings = Optional_Unsigned_Long(config, "maximum_number_of_scatterings", DEFAULT_MAXIMUM_SCATTERINGS);
 	run.maximum_free_time_steps = Optional_Unsigned_Long(config, "maximum_free_time_steps", DEFAULT_MAXIMUM_FREE_TIME_STEPS);
-	run.initial_radius = Optional_Value<double>(config, "initial_radius_rsun", 2.0) * rSun;
+	run.initial_radius_body_radius = Optional_Value<double>(config, "initial_radius_rsun", 2.0);
 	run.max_trajectory_wall_time_sec = Optional_Value<double>(config, "max_trajectory_wall_time_sec", 300.0);
 	run.capture_mode = Optional_Value<bool>(config, "capture_mode", false);
 	run.clear_existing_trajectories = Optional_Value<bool>(config, "clear_existing_trajectories", true);
 	int write_stride = Optional_Value<int>(config, "trajectory_write_stride", 1);
 	run.trajectory_write_stride = (write_stride > 0) ? static_cast<unsigned int>(write_stride) : 1;
 	run.txt_precision = Optional_Value<int>(config, "txt_precision", 10);
+	if(Setting_Exists(config, "random_seed"))
+	{
+		if(!config.lookupValue("random_seed", run.random_seed) || run.random_seed < 0)
+		{
+			std::cerr << "random_seed must be a non-negative integer." << std::endl;
+			std::exit(EXIT_FAILURE);
+		}
+		run.random_seed_configured = true;
+	}
 
 	if(run.txt_precision < 6)
 		run.txt_precision = 6;
@@ -350,16 +384,16 @@ std::unique_ptr<obscura::DM_Distribution> Build_DM_Distribution(const Config& co
 	std::exit(EXIT_FAILURE);
 }
 
-double Event_Energy_Ev(const Event& event, Solar_Model& solar_model, obscura::DM_Particle& DM)
+double Event_Energy_Ev(const Event& event, Celestial_Model& body_model, obscura::DM_Particle& DM)
 {
 	double radius = event.Radius();
 	double speed = event.Speed();
-	double v_escape = solar_model.Local_Escape_Speed(radius);
+	double v_escape = body_model.Local_Escape_Speed(radius);
 	double energy = 0.5 * DM.mass * (speed * speed - v_escape * v_escape);
 	return In_Units(energy, eV);
 }
 
-void Write_Trajectory_Row(std::ofstream& file, const Event& event, Solar_Model& solar_model, obscura::DM_Particle& DM, int precision, Trajectory_Stats& stats)
+void Write_Trajectory_Row(std::ofstream& file, const Event& event, Celestial_Model& body_model, obscura::DM_Particle& DM, int precision, Trajectory_Stats& stats)
 {
 	file << std::scientific << std::setprecision(precision)
 	     << In_Units(event.time, sec) << "\t"
@@ -369,7 +403,7 @@ void Write_Trajectory_Row(std::ofstream& file, const Event& event, Solar_Model& 
 	     << In_Units(event.velocity[0], km / sec) << "\t"
 	     << In_Units(event.velocity[1], km / sec) << "\t"
 	     << In_Units(event.velocity[2], km / sec) << "\t"
-	     << Event_Energy_Ev(event, solar_model, DM) << "\n";
+	     << Event_Energy_Ev(event, body_model, DM) << "\n";
 	stats.rows_written++;
 }
 
@@ -385,31 +419,31 @@ double RK45_Sanitized_Time_Step(double step)
 	return std::min(step, RK45_Absolute_Max_Time_Step());
 }
 
-double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximum_distance)
+double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximum_distance, double central_mass)
 {
 	double cap = RK45_Absolute_Max_Time_Step();
 	const double safe_speed = std::max(std::fabs(speed), 1.0e-12 * km / sec);
 	const double crossing_scale = std::max(0.25 * maximum_distance, 10.0 * km);
 	cap = std::min(cap, crossing_scale / safe_speed);
 	const double safe_radius = std::max(radius, 1.0 * km);
-	const double dynamical_time = sqrt(safe_radius * safe_radius * safe_radius / (G_Newton * mSun));
+	const double dynamical_time = sqrt(safe_radius * safe_radius * safe_radius / (G_Newton * central_mass));
 	if(std::isfinite(dynamical_time) && dynamical_time > 0.0)
 		cap = std::min(cap, 0.1 * dynamical_time);
 	return std::max(cap, 1.0e-8 * sec);
 }
 
-bool Outward_Escaping_At_Boundary(const Event& event, Solar_Model& solar_model, double boundary_radius)
+bool Outward_Escaping_At_Boundary(const Event& event, Celestial_Model& body_model, double boundary_radius)
 {
 	const double radius = event.Radius();
 	if(radius < boundary_radius)
 		return false;
 	const double radial_velocity = (radius > 0.0) ? event.position.Dot(event.velocity) / radius : 0.0;
-	return radial_velocity > 0.0 && event.Speed() > solar_model.Local_Escape_Speed(radius);
+	return radial_velocity > 0.0 && event.Speed() > body_model.Local_Escape_Speed(radius);
 }
 
-Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::DM_Particle& DM, Solar_Model& solar_model, Trajectory_Simulator& simulator, const Run_Config& run_config, std::ofstream& trajectory_file, std::chrono::steady_clock::time_point trajectory_wall_start, Trajectory_Stats& stats)
+Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::DM_Particle& DM, Celestial_Model& body_model, Trajectory_Simulator& simulator, const Run_Config& run_config, std::ofstream& trajectory_file, std::chrono::steady_clock::time_point trajectory_wall_start, Trajectory_Stats& stats)
 {
-	if(Outward_Escaping_At_Boundary(current_event, solar_model, run_config.initial_radius))
+	if(Outward_Escaping_At_Boundary(current_event, body_model, run_config.initial_radius))
 		return Free_Propagation_Result::Escape;
 
 	Free_Particle_Propagator particle_propagator(current_event);
@@ -419,16 +453,16 @@ Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::D
 	{
 		double r_before = particle_propagator.Current_Radius();
 		double v_before = particle_propagator.Current_Speed();
-		if(r_before >= rSun)
+		if(r_before >= body_model.Radius())
 		{
-			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, run_config.initial_radius);
+			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, run_config.initial_radius, body_model.Total_Mass());
 			particle_propagator.time_step = std::min(RK45_Sanitized_Time_Step(particle_propagator.time_step), step_cap);
 		}
 		else
 			particle_propagator.time_step = RK45_Sanitized_Time_Step(particle_propagator.time_step);
 
 		double t_before = particle_propagator.Current_Time();
-		particle_propagator.Runge_Kutta_45_Step(solar_model);
+		particle_propagator.Runge_Kutta_45_Step(body_model);
 		double actual_dt = particle_propagator.Current_Time() - t_before;
 		double r_after = particle_propagator.Current_Radius();
 		double v_after = particle_propagator.Current_Speed();
@@ -461,9 +495,9 @@ Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::D
 
 		current_event = particle_propagator.Event_In_3D();
 		if(stats.rk45_steps % run_config.trajectory_write_stride == 0)
-			Write_Trajectory_Row(trajectory_file, current_event, solar_model, DM, run_config.txt_precision, stats);
+			Write_Trajectory_Row(trajectory_file, current_event, body_model, DM, run_config.txt_precision, stats);
 
-		if(Event_Energy_Ev(current_event, solar_model, DM) < 0.0)
+		if(Event_Energy_Ev(current_event, body_model, DM) < 0.0)
 		{
 			stats.captured = true;
 			if(run_config.capture_mode)
@@ -472,11 +506,11 @@ Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::D
 
 		bool scattering = false;
 		bool reflection = false;
-		if(r_after < rSun)
+		if(r_after < body_model.Radius())
 		{
 			if(v_after < 0.0)
 				return Free_Propagation_Result::Abort;
-			double total_rate = solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after);
+			double total_rate = body_model.Total_DM_Scattering_Rate(DM, r_after, v_after);
 			double time_step_max = (total_rate > 0.0) ? (0.1 / total_rate) : (1.0e30);
 			if(particle_propagator.time_step > time_step_max)
 				particle_propagator.time_step = time_step_max;
@@ -484,7 +518,7 @@ Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::D
 			if(minus_log_xi < 0.0)
 				scattering = true;
 		}
-		else if(r_after >= run_config.initial_radius && r_after >= r_before && v_after > solar_model.Local_Escape_Speed(r_after))
+		else if(r_after >= run_config.initial_radius && r_after >= r_before && v_after > body_model.Local_Escape_Speed(r_after))
 			reflection = true;
 
 		if(scattering)
@@ -497,26 +531,26 @@ Free_Propagation_Result Propagate_Freely_To_Txt(Event& current_event, obscura::D
 	return Free_Propagation_Result::StepLimit;
 }
 
-Trajectory_Stats Simulate_Trajectory_To_Txt(Event initial_condition, obscura::DM_Particle& DM, Solar_Model& solar_model, Trajectory_Simulator& simulator, const Run_Config& run_config, std::ofstream& trajectory_file)
+Trajectory_Stats Simulate_Trajectory_To_Txt(Event initial_condition, obscura::DM_Particle& DM, Celestial_Model& body_model, Trajectory_Simulator& simulator, const Run_Config& run_config, std::ofstream& trajectory_file)
 {
 	Trajectory_Stats stats;
 	Event current_event = initial_condition;
 	auto trajectory_wall_start = std::chrono::steady_clock::now();
 
 	trajectory_file << "# columns: time_s x_km y_km z_km vx_km_s vy_km_s vz_km_s E_eV\n";
-	Write_Trajectory_Row(trajectory_file, current_event, solar_model, DM, run_config.txt_precision, stats);
-	if(Event_Energy_Ev(current_event, solar_model, DM) < 0.0)
+	Write_Trajectory_Row(trajectory_file, current_event, body_model, DM, run_config.txt_precision, stats);
+	if(Event_Energy_Ev(current_event, body_model, DM) < 0.0)
 		stats.captured = true;
 
 	while(stats.scatterings < run_config.maximum_number_of_scatterings)
 	{
-		Free_Propagation_Result result = Propagate_Freely_To_Txt(current_event, DM, solar_model, simulator, run_config, trajectory_file, trajectory_wall_start, stats);
+		Free_Propagation_Result result = Propagate_Freely_To_Txt(current_event, DM, body_model, simulator, run_config, trajectory_file, trajectory_wall_start, stats);
 		if(result == Free_Propagation_Result::Scatter)
 		{
 			simulator.Scatter(current_event, DM);
 			stats.scatterings++;
-			Write_Trajectory_Row(trajectory_file, current_event, solar_model, DM, run_config.txt_precision, stats);
-			if(Event_Energy_Ev(current_event, solar_model, DM) < 0.0)
+			Write_Trajectory_Row(trajectory_file, current_event, body_model, DM, run_config.txt_precision, stats);
+			if(Event_Energy_Ev(current_event, body_model, DM) < 0.0)
 			{
 				stats.captured = true;
 				if(run_config.capture_mode)
@@ -593,12 +627,18 @@ int main(int argc, char* argv[])
 
 	auto time_start = std::chrono::system_clock::now();
 	Solar_Model solar_model;
+	run_config.initial_radius = run_config.initial_radius_body_radius * solar_model.Radius();
 	if(mpi_rank == 0)
 	{
 		std::cout << PROJECT_NAME << " " << PROJECT_VERSION << std::endl
 		          << "Trajectory TXT runner" << std::endl
 		          << "MPI processes: " << mpi_processes << std::endl
+		          << "Body: " << run_config.body << std::endl
 		          << "Output mode: trajectory txt files only" << std::endl;
+		if(run_config.random_seed_configured)
+			std::cout << "PRNG seed: random_seed + mpi_rank, base random_seed = " << run_config.random_seed << std::endl;
+		else
+			std::cout << "PRNG seed: random_device" << std::endl;
 	}
 	solar_model.Interpolate_Total_DM_Scattering_Rate(*DM, run_config.interpolation_points, run_config.interpolation_points);
 
@@ -621,6 +661,17 @@ int main(int argc, char* argv[])
 
 	Trajectory_Simulator simulator(solar_model, run_config.maximum_free_time_steps, run_config.maximum_number_of_scatterings, run_config.initial_radius);
 	simulator.max_trajectory_wall_time_sec = run_config.max_trajectory_wall_time_sec;
+	if(run_config.random_seed_configured)
+	{
+		if(run_config.random_seed > std::numeric_limits<int>::max() - mpi_rank)
+		{
+			if(mpi_rank == 0)
+				std::cerr << "random_seed + mpi_rank exceeds the supported integer range." << std::endl;
+			MPI_Finalize();
+			return EXIT_FAILURE;
+		}
+		simulator.Fix_PRNG_Seed(run_config.random_seed + mpi_rank);
+	}
 
 	unsigned long int local_total = 0;
 	unsigned long int local_captured = 0;
@@ -643,8 +694,8 @@ int main(int argc, char* argv[])
 			MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
 		}
 
-		Event initial_condition = Initial_Conditions(*DM_distribution, solar_model, simulator.PRNG);
-		Hyperbolic_Kepler_Shift(initial_condition, run_config.initial_radius);
+		Event initial_condition = Initial_Conditions(*DM_distribution, solar_model, simulator.PRNG, run_config.asymptotic_distance);
+		Hyperbolic_Kepler_Shift(initial_condition, solar_model, run_config.initial_radius);
 		Trajectory_Stats stats = Simulate_Trajectory_To_Txt(initial_condition, *DM, solar_model, simulator, run_config, trajectory_file);
 		trajectory_file.close();
 

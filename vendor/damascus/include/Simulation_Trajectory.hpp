@@ -13,8 +13,8 @@
 
 #include "obscura/DM_Particle.hpp"
 
+#include "Celestial_Model.hpp"
 #include "Simulation_Utilities.hpp"
-#include "Solar_Model.hpp"
 
 extern std::string g_top_level_dir;  // 从config文件读取的输出目录
 
@@ -23,9 +23,6 @@ namespace DaMaSCUS_SUN
 
 // Bincount histogram constants
 constexpr int NUM_BINS = 2000;
-constexpr double R_SUN_KM = 6.957e5;  // km
-constexpr double BIN_MAX_KM = 2.0 * R_SUN_KM;  // 2 R_sun in km
-constexpr double BIN_WIDTH_KM = BIN_MAX_KM / NUM_BINS;  // ~695.7 km
 constexpr unsigned long int DEFAULT_MAXIMUM_FREE_TIME_STEPS = 1000000000000UL;
 constexpr unsigned long int DEFAULT_MAXIMUM_SCATTERINGS = 100000000000000UL;
 
@@ -71,16 +68,17 @@ struct Trajectory_Result
 
 	bool Particle_Reflected() const;
 	bool Particle_Free() const;
-	bool Particle_Captured(Solar_Model& solar_model) const;
+	bool Particle_Reflected(Celestial_Model& body_model) const;
+	bool Particle_Captured(Celestial_Model& body_model) const;
 
-	void Print_Summary(Solar_Model& solar_model, unsigned int mpi_rank = 0);
+	void Print_Summary(Celestial_Model& body_model, unsigned int mpi_rank = 0);
 };
 
 // 2. Simulator
 class Trajectory_Simulator
 {
   private:
-	Solar_Model solar_model;
+	Celestial_Model& body_model;
 	double v_max = 0.75;
 
 	// Per-trajectory bincount accumulation
@@ -124,7 +122,7 @@ class Trajectory_Simulator
 	unsigned int current_mpi_rank;
 	unsigned long int current_trajectory_id;
 
-	Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS, double max_distance = 2.0 * libphysica::natural_units::rSun);
+	Trajectory_Simulator(Celestial_Model& model, unsigned long int max_time_steps = DEFAULT_MAXIMUM_FREE_TIME_STEPS, unsigned long int max_scatterings = DEFAULT_MAXIMUM_SCATTERINGS, double max_distance = 0.0);
 
 	void Fix_PRNG_Seed(int fixed_seed);
 	void Set_Snapshot_Progress_Callback(std::function<void(const Trajectory_Simulator&)> callback);
@@ -158,7 +156,7 @@ class Free_Particle_Propagator
 
 	explicit Free_Particle_Propagator(const Event& event);
 
-	void Runge_Kutta_45_Step(Solar_Model& solar_model);
+	void Runge_Kutta_45_Step(Celestial_Model& body_model);
 	void Runge_Kutta_45_Step(double constant_mass);
 
 	double Current_Time();

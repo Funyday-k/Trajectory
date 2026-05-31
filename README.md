@@ -121,6 +121,8 @@ cmake --build build --target DaMaSCUS-SUN-TrajectoryTXT --config Release -j4
 
 ## Run
 
+The current default body is `Sun`. Existing solar configs do not need a `body` setting; if omitted, the executable behaves as the solar runner. `body = "Sun"` is accepted explicitly, and other body names are reserved for later refactor tasks. For reproducible smoke checks, set optional `random_seed`; when present, each MPI rank uses `random_seed + mpi_rank`.
+
 Smoke test:
 
 ```bash

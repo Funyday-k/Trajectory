@@ -26,6 +26,9 @@ endif()
 if(NOT EXISTS "${DAMASCUS_DATA_DIR}/model_agss09.dat")
   message(FATAL_ERROR "DAMASCUS_ROOT does not contain data/model_agss09.dat: ${DAMASCUS_ROOT}")
 endif()
+if(NOT EXISTS "${DAMASCUS_DATA_DIR}/earth_prem.dat")
+  message(FATAL_ERROR "DAMASCUS_ROOT does not contain data/earth_prem.dat: ${DAMASCUS_ROOT}")
+endif()
 if(NOT EXISTS "${OBSCURA_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "DAMASCUS_ROOT does not contain external/obscura: ${DAMASCUS_ROOT}")
 endif()
@@ -48,6 +51,7 @@ configure_file(
 
 add_library(damascus_trajectory_core STATIC
   "${DAMASCUS_SRC_DIR}/Dark_Photon.cpp"
+  "${DAMASCUS_SRC_DIR}/Earth_Model.cpp"
   "${DAMASCUS_SRC_DIR}/Simulation_Trajectory.cpp"
   "${DAMASCUS_SRC_DIR}/Simulation_Utilities.cpp"
   "${DAMASCUS_SRC_DIR}/Solar_Model.cpp")
@@ -74,6 +78,19 @@ target_include_directories(DaMaSCUS-SUN-TrajectoryTXT
     "${GENERATED_DIR}"
     ${MPI_INCLUDE_PATH})
 target_link_libraries(DaMaSCUS-SUN-TrajectoryTXT
+  PRIVATE
+    damascus_trajectory_core)
+
+add_executable(DaMaSCUS-EarthModelCheck
+  src/earth_model_check.cpp)
+
+target_compile_options(DaMaSCUS-EarthModelCheck PUBLIC -Wall -pedantic)
+target_include_directories(DaMaSCUS-EarthModelCheck
+  PRIVATE
+    "${DAMASCUS_INCLUDE_DIR}"
+    "${GENERATED_DIR}"
+    ${MPI_INCLUDE_PATH})
+target_link_libraries(DaMaSCUS-EarthModelCheck
   PRIVATE
     damascus_trajectory_core)
 

@@ -39,7 +39,7 @@ double RK45_Sanitized_Time_Step(double step)
 	return std::min(step, RK45_Absolute_Max_Time_Step());
 }
 
-double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximum_distance)
+double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximum_distance, double central_mass)
 {
 	double cap = RK45_Absolute_Max_Time_Step();
 	const double safe_speed = std::max(std::fabs(speed), 1.0e-12 * km / sec);
@@ -50,21 +50,21 @@ double Free_Propagation_Time_Step_Cap(double radius, double speed, double maximu
 
 	// 太阳外近似 Kepler 运动，步长不应大于局域动力学时间的一个固定比例。
 	const double safe_radius = std::max(radius, 1.0 * km);
-	const double dynamical_time = sqrt(safe_radius * safe_radius * safe_radius / (G_Newton * mSun));
+	const double dynamical_time = sqrt(safe_radius * safe_radius * safe_radius / (G_Newton * central_mass));
 	if(std::isfinite(dynamical_time) && dynamical_time > 0.0)
 		cap = std::min(cap, 0.1 * dynamical_time);
 
 	return std::max(cap, 1.0e-8 * sec);
 }
 
-bool Outward_Escaping_At_Boundary(const Event& event, Solar_Model& solar_model, double boundary_radius)
+bool Outward_Escaping_At_Boundary(const Event& event, Celestial_Model& body_model, double boundary_radius)
 {
 	const double radius = event.Radius();
 	if(radius < boundary_radius)
 		return false;
 
 	const double radial_velocity = (radius > 0.0) ? event.position.Dot(event.velocity) / radius : 0.0;
-	return radial_velocity > 0.0 && event.Speed() > solar_model.Local_Escape_Speed(radius);
+	return radial_velocity > 0.0 && event.Speed() > body_model.Local_Escape_Speed(radius);
 }
 
 bool RK45_Errors_Within_Tolerance(const double errors[3], const double tolerances[3])
@@ -112,11 +112,11 @@ Trajectory_Result::Trajectory_Result(const Event& event_ini, const Event& event_
 {
 }
 
-bool Trajectory_Result::Particle_Reflected() const
+bool Trajectory_Result::Particle_Reflected(Celestial_Model& body_model) const
 {
 	double r	= final_event.Radius();
-	double vesc = sqrt(2 * G_Newton * mSun / r);
-	return r > rSun && final_event.Speed() > vesc && number_of_scatterings > 0;
+	double vesc = body_model.Local_Escape_Speed(r);
+	return r > body_model.Radius() && final_event.Speed() > vesc && number_of_scatterings > 0;
 }
 
 bool Trajectory_Result::Particle_Free() const
@@ -124,14 +124,14 @@ bool Trajectory_Result::Particle_Free() const
 	return number_of_scatterings == 0;
 }
 
-bool Trajectory_Result::Particle_Captured(Solar_Model& solar_model) const
+bool Trajectory_Result::Particle_Captured(Celestial_Model& body_model) const
 {
 	double r	= final_event.Radius();
-	double vesc = solar_model.Local_Escape_Speed(r);
+	double vesc = body_model.Local_Escape_Speed(r);
 	return final_event.Speed() < vesc;
 }
 
-void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi_rank)
+void Trajectory_Result::Print_Summary(Celestial_Model& body_model, unsigned int mpi_rank)
 {
 	if(mpi_rank == 0)
 	{
@@ -140,16 +140,16 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 				  << std::endl
 				  << "Number of scatterings:\t" << number_of_scatterings << std::endl
 				  << "Simulation time [days]:\t" << libphysica::Round(In_Units(final_event.time, day)) << std::endl
-				  << "Final radius [rSun]:\t" << libphysica::Round(In_Units(final_event.Radius(), rSun)) << std::endl
+				  << "Final radius [body radii]:\t" << libphysica::Round(final_event.Radius() / body_model.Radius()) << std::endl
 				  << "Final speed [km/sec]:\t" << libphysica::Round(In_Units(final_event.Speed(), km / sec)) << std::endl
 				  << "Free particle:\t\t[" << (Particle_Free() ? "x" : " ") << "]" << std::endl
-				  << "Captured:\t\t[" << (Particle_Captured(solar_model) ? "x" : " ") << "]" << std::endl
-				  << "Reflection:\t\t[" << (Particle_Reflected() ? "x" : " ") << "]";
+				  << "Captured:\t\t[" << (Particle_Captured(body_model) ? "x" : " ") << "]" << std::endl
+				  << "Reflection:\t\t[" << (Particle_Reflected(body_model) ? "x" : " ") << "]";
 
-		if(Particle_Reflected())
+		if(Particle_Reflected(body_model))
 		{
-			double u_i_sqr = initial_event.Asymptotic_Speed_Sqr(solar_model);
-			double u_f_sqr = final_event.Asymptotic_Speed_Sqr(solar_model);
+			double u_i_sqr = initial_event.Asymptotic_Speed_Sqr(body_model);
+			double u_f_sqr = final_event.Asymptotic_Speed_Sqr(body_model);
 			// 检查渐近速度平方是否为正
 			if(u_i_sqr > 0.0 && u_f_sqr > 0.0)
 			{
@@ -167,12 +167,12 @@ void Trajectory_Result::Print_Summary(Solar_Model& solar_model, unsigned int mpi
 }
 
 // 2. Simulator
-Trajectory_Simulator::Trajectory_Simulator(const Solar_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
-: solar_model(model), terminate_on_capture(false), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance(max_distance), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), current_mpi_rank(0), current_trajectory_id(0)
+Trajectory_Simulator::Trajectory_Simulator(Celestial_Model& model, unsigned long int max_time_steps, unsigned long int max_scatterings, double max_distance)
+: body_model(model), terminate_on_capture(false), total_rk45_steps_current_traj(0), trajectory_in_progress(false), current_trajectory_physical_time_sec(0.0), maximum_time_steps(max_time_steps), maximum_scatterings(max_scatterings), maximum_distance((max_distance > 0.0) ? max_distance : 2.0 * model.Radius()), current_mpi_rank(0), current_trajectory_id(0)
 {
 	std::random_device rd;
 	PRNG.seed(rd());
-	rate_nuclei_cache.resize(solar_model.target_isotopes.size());
+	rate_nuclei_cache.resize(body_model.Target_Count());
 }
 
 void Trajectory_Simulator::Publish_Snapshot_Progress() const
@@ -222,9 +222,11 @@ const TrajectoryBincount& Trajectory_Simulator::Current_Trajectory_Bincount() co
 // Accumulate one step into the current bincount
 void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2, double dt_sec)
 {
-	if(dt_sec <= 0.0 || r_km < 0.0 || r_km >= BIN_MAX_KM)
+	double bin_max_km = In_Units(maximum_distance, km);
+	double bin_width_km = bin_max_km / NUM_BINS;
+	if(dt_sec <= 0.0 || r_km < 0.0 || r_km >= bin_max_km || bin_width_km <= 0.0)
 		return;
-	int bin_idx = static_cast<int>(r_km / BIN_WIDTH_KM);
+	int bin_idx = static_cast<int>(r_km / bin_width_km);
 	if(bin_idx < 0) bin_idx = 0;
 	if(bin_idx >= NUM_BINS) return;
 	current_bincount.dt_hist[bin_idx] += dt_sec;
@@ -233,7 +235,7 @@ void Trajectory_Simulator::Accumulate_Bincount_Step(double r_km, double v2_km2s2
 
 bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, double time, obscura::DM_Particle& DM)
 {
-	double vesc = solar_model.Local_Escape_Speed(radius);
+	double vesc = body_model.Local_Escape_Speed(radius);
 	double E = 0.5 * DM.mass * (speed * speed - vesc * vesc);
 	double E_eV = In_Units(E, eV);
 
@@ -254,7 +256,7 @@ bool Trajectory_Simulator::Update_Capture_State(double radius, double speed, dou
 
 bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Particle& DM)
 {
-	if(Outward_Escaping_At_Boundary(current_event, solar_model, maximum_distance))
+	if(Outward_Escaping_At_Boundary(current_event, body_model, maximum_distance))
 		return true;
 
 	Free_Particle_Propagator particle_propagator(current_event);
@@ -268,16 +270,16 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 		time_steps++;
 		double r_before = particle_propagator.Current_Radius();
 		double v_before = particle_propagator.Current_Speed();
-		if(r_before >= rSun)
+		if(r_before >= body_model.Radius())
 		{
-			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, maximum_distance);
+			const double step_cap = Free_Propagation_Time_Step_Cap(r_before, v_before, maximum_distance, body_model.Total_Mass());
 			particle_propagator.time_step = std::min(RK45_Sanitized_Time_Step(particle_propagator.time_step), step_cap);
 		}
 		else
 			particle_propagator.time_step = RK45_Sanitized_Time_Step(particle_propagator.time_step);
 
 		double t_before = particle_propagator.Current_Time();
-		particle_propagator.Runge_Kutta_45_Step(solar_model);
+		particle_propagator.Runge_Kutta_45_Step(body_model);
 		double actual_dt = particle_propagator.Current_Time() - t_before;
 		double r_after = particle_propagator.Current_Radius();
 		double v_after = particle_propagator.Current_Speed();
@@ -359,14 +361,14 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 		// Check for scatterings and reflection
 		bool scattering = false;
 		bool reflection = false;
-		if(r_after < rSun)
+		if(r_after < body_model.Radius())
 		{
 			if(v_after < 0.0)
 			{
 				std::cerr << "Warning: Negative velocity detected (v = " << v_after << ") at r = " << r_after << ", skipping scattering calculation." << std::endl;
 				break;
 			}
-			double total_rate = solar_model.Total_DM_Scattering_Rate(DM, r_after, v_after);
+			double total_rate = body_model.Total_DM_Scattering_Rate(DM, r_after, v_after);
 			double time_step_max = (total_rate > 0.0) ? (0.1 / total_rate) : (1e30);
 			if(particle_propagator.time_step > time_step_max)
 				particle_propagator.time_step = time_step_max;
@@ -376,7 +378,7 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 		}
 		else
 		{
-			if(r_after >= maximum_distance && r_after >= r_before && v_after > solar_model.Local_Escape_Speed(r_after))
+			if(r_after >= maximum_distance && r_after >= r_before && v_after > body_model.Local_Escape_Speed(r_after))
 				reflection = true;
 		}
 
@@ -394,17 +396,17 @@ bool Trajectory_Simulator::Propagate_Freely(Event& current_event, obscura::DM_Pa
 
 int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, double DM_speed)
 {
-	if(r > rSun)
+	if(r > body_model.Radius())
 	{
-		std::cerr << "Error in Trajectory_Simulator::Sample_Target(): r > rSun." << std::endl;
+		std::cerr << "Error in Trajectory_Simulator::Sample_Target(): r is outside the body." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
 	else
 	{
 		// C: 复用预分配的 rate_nuclei_cache，避免每次散射事件堆分配
-		for(unsigned int i = 0; i < solar_model.target_isotopes.size(); i++)
-			rate_nuclei_cache[i] = solar_model.DM_Scattering_Rate_Nucleus(DM, r, DM_speed, i);
-		double rate_electron = solar_model.DM_Scattering_Rate_Electron(DM, r, DM_speed);
+		for(unsigned int i = 0; i < body_model.Target_Count(); i++)
+			rate_nuclei_cache[i] = body_model.DM_Scattering_Rate_Nucleus(DM, r, DM_speed, i);
+		double rate_electron = body_model.DM_Scattering_Rate_Electron(DM, r, DM_speed);
 		double total_rate	 = std::accumulate(rate_nuclei_cache.begin(), rate_nuclei_cache.end(), rate_electron);
 
 		double xi = libphysica::Sample_Uniform(PRNG);
@@ -413,10 +415,10 @@ int Trajectory_Simulator::Sample_Target(obscura::DM_Particle& DM, double r, doub
 		if(sum > xi)
 			return -1;
 		// Nuclei
-		for(unsigned int i = 0; i < solar_model.target_isotopes.size(); i++)
+		for(unsigned int i = 0; i < body_model.Target_Count(); i++)
 		{
 			sum += rate_nuclei_cache[i] / total_rate;
-			if(sum > xi || i == solar_model.target_isotopes.size() - 1)
+			if(sum > xi || i == body_model.Target_Count() - 1)
 				return i;
 		}
 		std::cerr << "Error in Trajectory_Simulator::Sample_Target(): No target could be sampled." << std::endl;
@@ -492,12 +494,12 @@ void Trajectory_Simulator::Scatter(Event& current_event, obscura::DM_Particle& D
 	if(target_index == -1)
 		target_mass = mElectron;
 	else
-		target_mass = solar_model.target_isotopes[target_index].mass;
+		target_mass = body_model.Target_Isotope(target_index).mass;
 
-	libphysica::Vector vel_target = Sample_Target_Velocity(solar_model.Temperature(r), target_mass, current_event.velocity);
+	libphysica::Vector vel_target = Sample_Target_Velocity(body_model.Temperature(r), target_mass, current_event.velocity);
 
 	// 2. Sample the scattering angle
-	double cos_alpha = (target_index == -1) ? DM.Sample_Scattering_Angle_Electron(PRNG, v, r) : DM.Sample_Scattering_Angle_Nucleus(PRNG, solar_model.target_isotopes[target_index], v, r);
+	double cos_alpha = (target_index == -1) ? DM.Sample_Scattering_Angle_Electron(PRNG, v, r) : DM.Sample_Scattering_Angle_Nucleus(PRNG, body_model.Target_Isotope(target_index), v, r);
 
 	// 3. Construct the final DM velocity
 	current_event.velocity = New_DM_Velocity(cos_alpha, DM.mass, target_mass, current_event.velocity, vel_target);
@@ -529,7 +531,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 
 	while(Propagate_Freely(current_event, DM) && number_of_scatterings < maximum_scatterings)
 	{
-		if(current_event.Radius() < rSun)
+		if(current_event.Radius() < body_model.Radius())
 		{
 			Scatter(current_event, DM);
 			number_of_scatterings++;
@@ -547,7 +549,7 @@ Trajectory_Result Trajectory_Simulator::Simulate(const Event& initial_condition,
 		// Compute energy at the final event
 		double r_final = current_event.Radius();
 		double v_final = current_event.Speed();
-		double vesc_final = solar_model.Local_Escape_Speed(r_final);
+		double vesc_final = body_model.Local_Escape_Speed(r_final);
 		double E_final = 0.5 * DM.mass * (v_final * v_final - vesc_final * vesc_final);
 		if(In_Units(E_final, eV) < 0.0)
 			current_bincount.truncated = true;
@@ -596,7 +598,7 @@ double Free_Particle_Propagator::dphi_dt(double r)
 	return angular_momentum / r / r;
 }
 
-void Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
+void Free_Particle_Propagator::Runge_Kutta_45_Step(Celestial_Model& body_model)
 {
 	time_step = RK45_Sanitized_Time_Step(time_step);
 	bool accepted = false;
@@ -612,37 +614,37 @@ void Free_Particle_Propagator::Runge_Kutta_45_Step(Solar_Model& solar_model)
 
 	// Stage 0
 	k_r[0] = time_step * dr_dt(v_radial);
-	k_v[0] = time_step * dv_dt(radius, solar_model.Mass(radius));
+	k_v[0] = time_step * dv_dt(radius, body_model.Mass(radius));
 	k_p[0] = time_step * dphi_dt(radius);
 
 	// Stage 1
 	r_i = radius + k_r[0] / 4.0;
 	k_r[1] = time_step * dr_dt(v_radial + k_v[0] / 4.0);
-	k_v[1] = time_step * dv_dt(r_i, solar_model.Mass(r_i));
+	k_v[1] = time_step * dv_dt(r_i, body_model.Mass(r_i));
 	// k_p[1]=	dt*dphi_dt(radius+k_r[0]/4.0,J);
 
 	// Stage 2
 	r_i = radius + 3.0 / 32.0 * k_r[0] + 9.0 / 32.0 * k_r[1];
 	k_r[2] = time_step * dr_dt(v_radial + 3.0 / 32.0 * k_v[0] + 9.0 / 32.0 * k_v[1]);
-	k_v[2] = time_step * dv_dt(r_i, solar_model.Mass(r_i));
+	k_v[2] = time_step * dv_dt(r_i, body_model.Mass(r_i));
 	k_p[2] = time_step * dphi_dt(r_i);
 
 	// Stage 3
 	r_i = radius + 1932.0 / 2197.0 * k_r[0] - 7200.0 / 2197.0 * k_r[1] + 7296.0 / 2197.0 * k_r[2];
 	k_r[3] = time_step * dr_dt(v_radial + 1932.0 / 2197.0 * k_v[0] - 7200.0 / 2197.0 * k_v[1] + 7296.0 / 2197.0 * k_v[2]);
-	k_v[3] = time_step * dv_dt(r_i, solar_model.Mass(r_i));
+	k_v[3] = time_step * dv_dt(r_i, body_model.Mass(r_i));
 	k_p[3] = time_step * dphi_dt(r_i);
 
 	// Stage 4
 	r_i = radius + 439.0 / 216.0 * k_r[0] - 8.0 * k_r[1] + 3680.0 / 513.0 * k_r[2] - 845.0 / 4104.0 * k_r[3];
 	k_r[4] = time_step * dr_dt(v_radial + 439.0 / 216.0 * k_v[0] - 8.0 * k_v[1] + 3680.0 / 513.0 * k_v[2] - 845.0 / 4104.0 * k_v[3]);
-	k_v[4] = time_step * dv_dt(r_i, solar_model.Mass(r_i));
+	k_v[4] = time_step * dv_dt(r_i, body_model.Mass(r_i));
 	k_p[4] = time_step * dphi_dt(r_i);
 
 	// Stage 5
 	r_i = radius - 8.0 / 27.0 * k_r[0] + 2.0 * k_r[1] - 3544.0 / 2565.0 * k_r[2] + 1859.0 / 4104.0 * k_r[3] - 11.0 / 40.0 * k_r[4];
 	k_r[5] = time_step * dr_dt(v_radial - 8.0 / 27.0 * k_v[0] + 2.0 * k_v[1] - 3544.0 / 2565.0 * k_v[2] + 1859.0 / 4104.0 * k_v[3] - 11.0 / 40.0 * k_v[4]);
-	k_v[5] = time_step * dv_dt(r_i, solar_model.Mass(r_i));
+	k_v[5] = time_step * dv_dt(r_i, body_model.Mass(r_i));
 	k_p[5] = time_step * dphi_dt(r_i);
 
 	// New values with Runge Kutta 4 and Runge Kutta 5

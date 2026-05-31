@@ -38,11 +38,11 @@ double Event::Angular_Momentum() const
 	return position.Cross(velocity).Norm();
 }
 
-double Event::Asymptotic_Speed_Sqr(Solar_Model& solar_model) const
+double Event::Asymptotic_Speed_Sqr(Celestial_Model& body_model) const
 {
 	double r	 = Radius();
 	double v	 = Speed();
-	double vesc	 = solar_model.Local_Escape_Speed(r);
+	double vesc	 = body_model.Local_Escape_Speed(r);
 	double u_sqr = v * v - vesc * vesc;
 	return u_sqr;
 }
@@ -81,9 +81,9 @@ std::ostream& operator<<(std::ostream& output, const Event& event)
 }
 
 // 2. Generator of initial conditions
-double PDF_Initial_Speed(double v, obscura::DM_Distribution& halo_model, Solar_Model& solar_model)
+double PDF_Initial_Speed(double v, obscura::DM_Distribution& halo_model, Celestial_Model& body_model)
 {
-	double v_esc			 = solar_model.Local_Escape_Speed(rSun);
+	double v_esc			 = body_model.Local_Escape_Speed(body_model.Radius());
 	double v_average		 = halo_model.Average_Speed();
 	double v_inverse_average = halo_model.Eta_Function(0.0);
 	return halo_model.PDF_Speed(v) * (v + v_esc * v_esc / v) / (v_average + v_esc * v_esc * v_inverse_average);
@@ -101,12 +101,12 @@ double PDF_Cos_Theta(double cos_theta, double v, obscura::DM_Distribution& halo_
 	return normalization * halo_model.PDF_Velocity(vel);
 }
 
-Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& solar_model, std::mt19937& PRNG)
+Event Initial_Conditions(obscura::DM_Distribution& halo_model, Celestial_Model& body_model, std::mt19937& PRNG, double asymptotic_distance)
 {
 	// 1. Initial velocity
 	// 1.1. Sample initial speed u asymptotically far from the Sun.
-	std::function<double(double)> pdf_v = [&halo_model, &solar_model](double v) {
-		return PDF_Initial_Speed(v, halo_model, solar_model);
+	std::function<double(double)> pdf_v = [&halo_model, &body_model](double v) {
+		return PDF_Initial_Speed(v, halo_model, body_model);
 	};
 	double u = libphysica::Rejection_Sampling(pdf_v, halo_model.Minimum_DM_Speed(), halo_model.Maximum_DM_Speed(), 1200.0, PRNG);
 
@@ -129,15 +129,15 @@ Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& sola
 	libphysica::Vector initial_velocity = libphysica::Spherical_Coordinates(u, acos(cos_theta), phi, vel_sun);
 
 	// 1.4. Blue-shift the speed
-	double asymptotic_distance = 1000.0 * AU;
-	double vesc_asymptotic	   = solar_model.Local_Escape_Speed(asymptotic_distance);
+	double vesc_asymptotic	   = body_model.Local_Escape_Speed(asymptotic_distance);
 	double v				   = sqrt(u * u + vesc_asymptotic * vesc_asymptotic);
 	initial_velocity		   = v * initial_velocity.Normalized();
 
 	// 2. Initial position
 	// 2.1 Find the maximum impact parameter such that the particle still hits the Sun.
-	double v_esc				= solar_model.Local_Escape_Speed(rSun);
-	double impact_parameter_max = sqrt(u * u + v_esc * v_esc) / v * rSun;
+	double body_radius			= body_model.Radius();
+	double v_esc				= body_model.Local_Escape_Speed(body_radius);
+	double impact_parameter_max = sqrt(u * u + v_esc * v_esc) / v * body_radius;
 	libphysica::Vector e_z		= (-1.0) * initial_velocity.Normalized();
 	libphysica::Vector e_x({0, e_z[2], -e_z[1]});
 	e_x.Normalize();
@@ -153,26 +153,28 @@ Event Initial_Conditions(obscura::DM_Distribution& halo_model, Solar_Model& sola
 }
 
 // 3. Analytically propagate a particle at event on a hyperbolic Kepler orbit to a radius R (without passing the periapsis)
-void Hyperbolic_Kepler_Shift(Event& event, double R_final)
+void Hyperbolic_Kepler_Shift(Event& event, Celestial_Model& body_model, double R_final)
 {
 	// 1. Initial event
 	double R_initial		= event.Radius();
 	double v_initial		= event.Speed();
 	double angular_momentum = event.Angular_Momentum();
+	double body_radius		= body_model.Radius();
+	double body_mass		= body_model.Total_Mass();
 
-	if(R_final < rSun || R_initial < rSun)
+	if(R_final < body_radius || R_initial < body_radius)
 	{
-		std::cerr << "Error in Hyperbolic_Kepler_Shift(): Orbits inside the Sun cannot be described analytically." << std::endl;
+		std::cerr << "Error in Hyperbolic_Kepler_Shift(): Orbits inside the body cannot be described analytically." << std::endl;
 		std::exit(EXIT_FAILURE);
 	}
 
 	// 2. Asymptotic speed
-	double vEsc = sqrt(2 * G_Newton * mSun / R_initial);
+	double vEsc = sqrt(2 * G_Newton * body_mass / R_initial);
 	double u2	= v_initial * v_initial - vEsc * vEsc;
 
 	// 3. Kepler orbit parameter
-	double semi_major_axis	= G_Newton * mSun / u2;
-	double semilatus_rectum = angular_momentum * angular_momentum / G_Newton / mSun;
+	double semi_major_axis	= G_Newton * body_mass / u2;
+	double semilatus_rectum = angular_momentum * angular_momentum / G_Newton / body_mass;
 	double eccentricity		= sqrt(1.0 + semilatus_rectum / semi_major_axis);
 	// double perihelion		= semi_major_axis * ( eccentricity - 1.0);
 
@@ -189,14 +191,14 @@ void Hyperbolic_Kepler_Shift(Event& event, double R_final)
 	// 6.1 Time
 	// double F1 = acosh((eccentricity + cos(theta_initial)) / (1.0 + eccentricity * cos(theta_initial)));
 	// double M1 = eccentricity * sinh(F1) - F1;
-	// double t1 = sqrt(pow(+semi_major_axis, 3) / G_Newton / mSun) * M1;
+	// double t1 = sqrt(pow(+semi_major_axis, 3) / G_Newton / body_mass) * M1;
 	// double F2 = acosh((eccentricity + cos(theta_final)) / (1.0 + eccentricity * cos(theta_final)));
 	// double M2 = eccentricity * sinh(F2) - F2;
-	// double t2 = sqrt(pow(+semi_major_axis, 3) / G_Newton / mSun) * M2;
+	// double t2 = sqrt(pow(+semi_major_axis, 3) / G_Newton / body_mass) * M2;
 	// event.time += libphysica::Sign(R_final - R_initial) * (t2 - t1);
 	// 6.2 Position and Velocity
 	event.position = R_final * cos(theta_final) * axis_x + R_final * sin(theta_final) * axis_y;
-	event.velocity = sqrt(G_Newton * mSun / semilatus_rectum) * (eccentricity * sin(theta_final) * event.position.Normalized() + (1.0 + eccentricity * cos(theta_final)) * axis_z.Cross(event.position.Normalized()));
+	event.velocity = sqrt(G_Newton * body_mass / semilatus_rectum) * (eccentricity * sin(theta_final) * event.position.Normalized() + (1.0 + eccentricity * cos(theta_final)) * axis_z.Cross(event.position.Normalized()));
 }
 
 // 4. Equiareal isodetection rings
